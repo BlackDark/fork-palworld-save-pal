@@ -1,0 +1,23 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test-deps
+    volumes:
+      # Mount source code for live editing during development
+      - ./palworld_save_pal:/app/palworld_save_pal
+      - ./tests:/app/tests
+      - ./save:/app/save
+      - ./pytest.ini:/app/pytest.ini
+      - ./psp.py:/app/psp.py
+      # Mount data directory if needed
+      - ./data:/app/data
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    command: pytest tests/test_player_loading.py -v --tb=short
+    # Override command to run specific tests:
+    # command: pytest tests/ -v
+    # Or run interactively:
+    # command: /bin/bash

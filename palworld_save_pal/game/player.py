@@ -117,11 +117,19 @@ class Player(BaseModel):
 
     @computed_field
     def level(self) -> int:
-        return (
-            PalObjects.get_byte_property(self._save_parameter["Level"])
-            if "Level" in self._save_parameter
-            else 1
-        )
+        if "Level" not in self._save_parameter:
+            return 1
+        level_value = PalObjects.get_byte_property(self._save_parameter["Level"])
+        if level_value is None:
+            return 1
+        try:
+            # Convert to int, handling both string and int values
+            return int(level_value) if not isinstance(level_value, int) else level_value
+        except (ValueError, TypeError):
+            logger.warning(
+                "Failed to convert level to int for player %s: %s", self.uid, level_value
+            )
+            return 1
 
     @level.setter
     def level(self, value: int):

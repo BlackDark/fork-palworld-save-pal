@@ -168,15 +168,19 @@ async def load_zip_file_handler(message: LoadZipFileMessage, ws: WebSocket):
                 player_id = player_id.replace("_dps", "")
                 dps = True
             try:
-                player_uuid = uuid.UUID(player_id)
-            except ValueError:
-                logger.warning("Skipping invalid player file name: %s", f)
+                from palworld_save_pal.utils.uuid import parse_uuid_from_string
+                player_uuid = parse_uuid_from_string(player_id)
+                logger.debug("Parsed player UUID from filename: %s -> %s", f, player_uuid)
+            except ValueError as e:
+                logger.warning("Skipping invalid player file name: %s (error: %s)", f, e)
                 continue
 
             if player_uuid not in player_saves:
                 player_saves[player_uuid] = {}
             save_type = "dps" if dps else "sav"
             player_saves[player_uuid][save_type] = zip_ref.read(f)
+        
+        logger.info("Loaded %d player save files from zip", len(player_saves))
 
         if not player_saves:
             raise ValueError("No valid player save files found in the 'Players' folder")
@@ -185,7 +189,7 @@ async def load_zip_file_handler(message: LoadZipFileMessage, ws: WebSocket):
             sav_id=save_id,
             level_sav=level_sav_data,
             level_meta=level_meta_data,
-            player_savs=player_saves,
+            player_file_refs=player_saves,
             ws_callback=ws_callback,
         )
 

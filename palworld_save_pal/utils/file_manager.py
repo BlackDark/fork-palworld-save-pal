@@ -189,7 +189,8 @@ class FileManager:
                     dps = True
 
                 logger.debug("Reading player save: %s, uuid: %s", save_file, player_id)
-                player_uuid = uuid.UUID(player_id)
+                from palworld_save_pal.utils.uuid import parse_uuid_from_string
+                player_uuid = parse_uuid_from_string(player_id)
 
                 if player_uuid not in player_saves:
                     player_saves[player_uuid] = {}
@@ -220,7 +221,8 @@ class FileManager:
                 logger.debug(
                     "Found player save path: %s, uuid: %s", save_file, player_id
                 )
-                player_uuid = uuid.UUID(player_id)
+                from palworld_save_pal.utils.uuid import parse_uuid_from_string
+                player_uuid = parse_uuid_from_string(player_id)
 
                 if player_uuid not in player_save_paths:
                     player_save_paths[player_uuid] = {}

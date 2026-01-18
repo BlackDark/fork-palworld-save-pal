@@ -871,20 +871,62 @@ class SaveFile(BaseModel):
     def get_player_summaries(self) -> Dict[UUID, PlayerSummary]:
         valid_summaries = {}
         filtered_count = 0
+        
+        # Log for debugging
+        logger.info(
+            "get_player_summaries: checking %d summaries against %d file refs",
+            len(self._player_summaries),
+            len(self._player_file_refs),
+        )
+        logger.info(
+            "Summary UUIDs: %s",
+            [str(uid) for uid in self._player_summaries.keys()],
+        )
+        logger.info(
+            "File ref UUIDs: %s",
+            [str(uid) for uid in self._player_file_refs.keys()],
+        )
+        
+        # Normalize UUIDs for comparison (convert to lowercase strings without dashes)
+        file_ref_uuids_normalized = {
+            str(uid).lower().replace("-", ""): uid for uid in self._player_file_refs.keys()
+        }
 
         for player_id, summary in self._player_summaries.items():
+            player_id_str = str(player_id).lower().replace("-", "")
+            
+            # Try direct match first
             if player_id in self._player_file_refs:
                 valid_summaries[player_id] = summary
+            # Try normalized match (case-insensitive, dash-insensitive)
+            elif player_id_str in file_ref_uuids_normalized:
+                matched_uid = file_ref_uuids_normalized[player_id_str]
+                logger.info(
+                    "UUID match found using normalized comparison: %s -> %s",
+                    player_id,
+                    matched_uid,
+                )
+                # Use the matched UUID from file refs as the key
+                valid_summaries[matched_uid] = summary
             else:
                 filtered_count += 1
                 logger.warning(
-                    f"Filtering out player {player_id} ({summary.nickname}) - no .sav file reference"
+                    f"Filtering out player {player_id} ({summary.nickname}) - no .sav file reference. "
+                    f"Summary UUID (normalized): {player_id_str}, "
+                    f"Available file ref UUIDs (normalized): {list(file_ref_uuids_normalized.keys())}"
                 )
 
         if filtered_count > 0:
-            logger.info(
+            logger.warning(
                 f"Filtered {filtered_count} players without .sav files, "
                 f"returning {len(valid_summaries)} valid players"
+            )
+        elif len(self._player_summaries) > 0 and len(valid_summaries) == 0:
+            logger.error(
+                "No valid players found! This indicates a UUID mismatch between "
+                "CharacterSaveParameterMap and player file references. "
+                f"Summary UUIDs: {[str(uid) for uid in self._player_summaries.keys()]}, "
+                f"File ref UUIDs: {[str(uid) for uid in self._player_file_refs.keys()]}"
             )
 
         return valid_summaries
@@ -928,9 +970,23 @@ class SaveFile(BaseModel):
         self._set_data()
 
         self._player_file_refs = player_file_refs
+        
+        # Log player file refs for debugging
+        logger.info(
+            "Player file refs loaded: %d entries with UUIDs: %s",
+            len(player_file_refs),
+            [str(uid) for uid in player_file_refs.keys()],
+        )
 
         await ws_callback("Extracting player summaries...")
         self._extract_player_summaries()
+        
+        # Log extracted summaries for debugging
+        logger.info(
+            "Extracted player summaries: %d entries with UUIDs: %s",
+            len(self._player_summaries),
+            [str(uid) for uid in self._player_summaries.keys()],
+        )
 
         await ws_callback("Extracting guild summaries...")
         self._extract_guild_summaries()
@@ -966,6 +1022,7 @@ class SaveFile(BaseModel):
     ) -> Tuple[List[Tuple[UUID, Dict[str, Any]]], Dict[UUID, int]]:
         players_data: List[Tuple[UUID, Dict[str, Any]]] = []
         pal_owner_counts: Dict[UUID, int] = {}
+        invalid_entries = []
 
         for entry in self._character_save_parameter_map:
             try:
@@ -980,7 +1037,17 @@ class SaveFile(BaseModel):
                     uid = PalObjects.get_guid(entry["key"]["PlayerUId"])
                     if uid and not is_empty_uuid(uid):
                         players_data.append((uid, save_parameter))
-                except (KeyError, TypeError):
+                    else:
+                        invalid_entries.append(entry)
+                        logger.warning(
+                            "Found player entry with invalid or empty PlayerUId: %s",
+                            entry.get("key", {}).get("PlayerUId"),
+                        )
+                except (KeyError, TypeError) as e:
+                    invalid_entries.append(entry)
+                    logger.warning(
+                        "Failed to extract PlayerUId from player entry: %s", e
+                    )
                     continue
             else:
                 owner_uid_data = save_parameter.get("OwnerPlayerUId")
@@ -990,6 +1057,13 @@ class SaveFile(BaseModel):
                         pal_owner_counts[owner_uid] = (
                             pal_owner_counts.get(owner_uid, 0) + 1
                         )
+
+        if invalid_entries:
+            logger.warning(
+                "Found %d player entries with invalid PlayerUId. "
+                "These may cause issues when saving/loading.",
+                len(invalid_entries),
+            )
 
         self._pal_owner_counts_cache = pal_owner_counts
 
@@ -1031,6 +1105,86 @@ class SaveFile(BaseModel):
 
         return player_guild_map
 
+    def _extract_level_from_player_file(self, uid: UUID) -> Optional[int]:
+        """Extract level from player's .sav file as a fallback."""
+        if uid not in self._player_file_refs:
+            return None
+        
+        file_ref = self._player_file_refs[uid]
+        sav_data = file_ref.get("sav")
+        if sav_data is None:
+            return None
+        
+        try:
+            if isinstance(sav_data, bytes):
+                sav_bytes = sav_data
+            else:
+                with open(sav_data, "rb") as f:
+                    sav_bytes = f.read()
+            
+            # Decompress and read just enough to get the level
+            raw_gvas, _ = decompress_sav_to_gvas(sav_bytes)
+            gvas_file = GvasFile.read(
+                raw_gvas, PALWORLD_TYPE_HINTS, CUSTOM_PROPERTIES, allow_nan=True
+            )
+            
+            # Get SaveData -> SaveParameter -> Level
+            # Structure matches Player class: gvas_file.properties["SaveData"]["value"]["SaveParameter"]["value"]["Level"]
+            save_data_prop = gvas_file.properties.get("SaveData", {})
+            if not save_data_prop:
+                logger.warning("No SaveData property in gvas_file.properties for %s. Available: %s", uid, list(gvas_file.properties.keys())[:10])
+                return None
+                
+            save_data = PalObjects.get_value(save_data_prop)
+            if not save_data:
+                logger.warning("No SaveData value found in player file for %s", uid)
+                return None
+            
+            # SaveParameter is nested in the save_data
+            save_parameter_prop = save_data.get("SaveParameter", {})
+            if not save_parameter_prop:
+                logger.warning("No SaveParameter found in SaveData for %s. Available keys: %s", uid, list(save_data.keys())[:20])
+                return None
+            
+            # Get the value from SaveParameter (it's a struct property)
+            save_parameter_value = PalObjects.get_value(save_parameter_prop)
+            if not save_parameter_value:
+                logger.warning("No SaveParameter value found for %s. SaveParameter prop keys: %s", uid, list(save_parameter_prop.keys())[:10])
+                return None
+            
+            # Try to get Level from SaveParameter value (same way Player class does it)
+            level_data = save_parameter_value.get("Level")
+            if not level_data:
+                logger.warning("No Level found in SaveParameter for %s. Available keys: %s", uid, list(save_parameter_value.keys())[:20])
+                return None
+                
+            # Use the same method as Player.level property
+            level_value = PalObjects.get_byte_property(level_data)
+            if level_value is not None:
+                try:
+                    result = int(level_value) if not isinstance(level_value, int) else level_value
+                    logger.info("Successfully extracted level %d from player file for %s", result, uid)
+                    return result
+                except (ValueError, TypeError):
+                    logger.warning("Failed to convert level to int from player file %s: %s (type: %s)", uid, level_value, type(level_value))
+            else:
+                # Try direct nested access as fallback
+                level_value = PalObjects.get_nested(level_data, "value", "value", default=None)
+                if level_value is not None:
+                    try:
+                        result = int(level_value) if not isinstance(level_value, int) else level_value
+                        logger.info("Successfully extracted level %d from player file (nested) for %s", result, uid)
+                        return result
+                    except (ValueError, TypeError):
+                        logger.warning("Failed to convert level to int from player file (nested) %s: %s (type: %s)", uid, level_value, type(level_value))
+                else:
+                    logger.warning("Level data found but could not extract value for %s. Level data structure: %s", uid, type(level_data))
+            
+            return None
+        except Exception as e:
+            logger.warning("Failed to extract level from player file %s: %s", uid, e, exc_info=True)
+            return None
+
     def _create_player_summary(
         self,
         uid: UUID,
@@ -1051,7 +1205,110 @@ class SaveFile(BaseModel):
 
         level = None
         if "Level" in save_parameter:
-            level = PalObjects.get_byte_property(save_parameter["Level"])
+            level_data = save_parameter["Level"]
+            logger.debug("Found Level key in save_parameter for %s (nickname: %s). Level data type: %s", uid, nickname, type(level_data))
+            # Handle different Level property structures
+            if isinstance(level_data, dict):
+                # Try get_byte_property first
+                level_value = PalObjects.get_byte_property(level_data)
+                logger.debug("get_byte_property returned: %s (type: %s) for %s", level_value, type(level_value), uid)
+                if level_value is None:
+                    # Fallback: try direct value access
+                    level_value = PalObjects.get_nested(level_data, "value", "value", default=None)
+                    logger.debug("get_nested(value, value) returned: %s for %s", level_value, uid)
+                    if level_value is None:
+                        # Try alternative structure
+                        level_value = level_data.get("value")
+                        logger.debug("level_data.get('value') returned: %s (type: %s) for %s", level_value, type(level_value), uid)
+                        if isinstance(level_value, dict):
+                            level_value = level_value.get("value")
+                            logger.debug("Nested dict value returned: %s for %s", level_value, uid)
+                if level_value is not None:
+                    try:
+                        # Convert to int, handling both string and int values
+                        level = int(level_value) if not isinstance(level_value, int) else level_value
+                        logger.info("Successfully extracted level %d from save_parameter for %s (nickname: %s)", level, uid, nickname)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "Failed to convert level to int for player %s (nickname: %s): %s (type: %s)",
+                            uid,
+                            nickname,
+                            level_value,
+                            type(level_value),
+                        )
+                        level = None
+                else:
+                    logger.warning(
+                        "Level property exists but value is None for player %s (nickname: %s). Level data structure: %s",
+                        uid,
+                        nickname,
+                        level_data,
+                    )
+            else:
+                # Level is not a dict, try to use it directly
+                try:
+                    level = int(level_data) if not isinstance(level_data, int) else level_data
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Level property is not a dict for player %s: %s (type: %s)",
+                        uid,
+                        level_data,
+                        type(level_data),
+                    )
+        
+        # Fallback: if level is still None, try to temporarily load the player to get the level
+        # This is more reliable than trying to parse the file structure manually
+        if level is None and uid in self._player_file_refs:
+            logger.debug("Level not found in CharacterSaveParameterMap for %s (nickname: %s), trying to load player temporarily", uid, nickname)
+            try:
+                # Find the player entry in CharacterSaveParameterMap
+                player_entry = None
+                for entry in self._character_save_parameter_map:
+                    if self._is_player(entry):
+                        entry_player_uid = PalObjects.get_guid(entry["key"]["PlayerUId"])
+                        if are_equal_uuids(entry_player_uid, uid):
+                            player_entry = entry
+                            break
+                
+                if player_entry:
+                    # Try to extract save_parameter the same way Player class does
+                    try:
+                        player_save_parameter = PalObjects.get_nested(
+                            player_entry,
+                            "value",
+                            "RawData",
+                            "value",
+                            "object",
+                            "SaveParameter",
+                            "value",
+                        )
+                        if player_save_parameter and "Level" in player_save_parameter:
+                            level_value = PalObjects.get_byte_property(player_save_parameter["Level"])
+                            if level_value is not None:
+                                try:
+                                    level = int(level_value) if not isinstance(level_value, int) else level_value
+                                    logger.info("Successfully extracted level %d from CharacterSaveParameterMap entry for %s (nickname: %s)", level, uid, nickname)
+                                except (ValueError, TypeError):
+                                    logger.warning("Failed to convert level from CharacterSaveParameterMap for %s: %s", uid, level_value)
+                    except (KeyError, TypeError) as e:
+                        logger.debug("Failed to extract save_parameter from CharacterSaveParameterMap entry for %s: %s", uid, e)
+                
+                # If still None, try loading from player file as last resort
+                if level is None:
+                    level = self._extract_level_from_player_file(uid)
+                    if level is not None:
+                        logger.info("Successfully extracted level %d from player file for %s (nickname: %s)", level, uid, nickname)
+                    else:
+                        logger.warning("Could not extract level from player file for %s (nickname: %s), defaulting to None", uid, nickname)
+            except Exception as e:
+                logger.warning("Error trying to extract level for %s (nickname: %s): %s", uid, nickname, e, exc_info=True)
+        elif level is None:
+            logger.warning(
+                "No 'Level' key in save_parameter for player %s (nickname: %s). Available keys: %s",
+                uid,
+                nickname,
+                list(save_parameter.keys())[:30],  # Show first 30 keys
+            )
 
         return PlayerSummary(
             uid=uid,
@@ -1391,15 +1648,31 @@ class SaveFile(BaseModel):
         player_entry = None
         for entry in self._character_save_parameter_map:
             if self._is_player(entry):
-                if are_equal_uuids(
-                    PalObjects.get_guid(entry["key"]["PlayerUId"]), player_id
-                ):
+                entry_player_uid = PalObjects.get_guid(entry["key"]["PlayerUId"])
+                if are_equal_uuids(entry_player_uid, player_id):
                     player_entry = entry
                     break
+                else:
+                    # Log mismatch for debugging
+                    logger.debug(
+                        "Player entry UID mismatch: entry has %s, requested %s",
+                        entry_player_uid,
+                        player_id,
+                    )
 
         if not player_entry:
             logger.warning(f"No character entry for player {player_id}")
             return None
+
+        # Validate that the entry's PlayerUId matches the requested player_id
+        entry_player_uid = PalObjects.get_guid(player_entry["key"]["PlayerUId"])
+        if not are_equal_uuids(entry_player_uid, player_id):
+            logger.error(
+                "Player entry UID mismatch: entry has %s, requested %s. "
+                "This may cause save/load issues.",
+                entry_player_uid,
+                player_id,
+            )
 
         if ws_callback:
             await ws_callback("Loading pals...")
@@ -1593,8 +1866,79 @@ class SaveFile(BaseModel):
 
         return pals
 
+    def _validate_player_entries_before_save(self) -> None:
+        """
+        Validate that all loaded players have corresponding entries in
+        CharacterSaveParameterMap before saving. This prevents ID mapping issues.
+        """
+        missing_entries = []
+        mismatched_entries = []
+        
+        for player_uid, player in self._players.items():
+            entry_found = False
+            for entry in self._character_save_parameter_map:
+                if self._is_player(entry):
+                    entry_player_uid = PalObjects.get_guid(entry["key"]["PlayerUId"])
+                    if are_equal_uuids(entry_player_uid, player_uid):
+                        entry_found = True
+                        # Verify the entry is the same reference as player's character_save
+                        if entry is not player.character_save:
+                            logger.debug(
+                                "Player %s entry found but reference differs. "
+                                "This is normal if entry was reloaded.",
+                                player.nickname,
+                            )
+                        break
+                    elif entry is player.character_save:
+                        # Entry reference matches but UID doesn't - this is a problem
+                        mismatched_entries.append((player_uid, entry_player_uid, player))
+                        entry_found = True
+                        break
+            
+            if not entry_found:
+                missing_entries.append((player_uid, player))
+        
+        if missing_entries:
+            logger.error(
+                "Found %d loaded players without CharacterSaveParameterMap entries. "
+                "These players will not be saved correctly: %s",
+                len(missing_entries),
+                [p.nickname for _, p in missing_entries],
+            )
+            # Try to add missing entries
+            for player_uid, player in missing_entries:
+                logger.warning(
+                    "Attempting to add missing entry for player %s (%s)",
+                    player.nickname,
+                    player_uid,
+                )
+                # The entry should already exist via character_save, so this is a critical error
+                # Log it but don't fail - let the save proceed with a warning
+        
+        if mismatched_entries:
+            logger.error(
+                "Found %d players with mismatched PlayerUId in CharacterSaveParameterMap. "
+                "Fixing entries...",
+                len(mismatched_entries),
+            )
+            for player_uid, entry_uid, player in mismatched_entries:
+                logger.warning(
+                    "Fixing PlayerUId mismatch for player %s: entry has %s, player has %s",
+                    player.nickname,
+                    entry_uid,
+                    player_uid,
+                )
+                # Update the entry's PlayerUId
+                for entry in self._character_save_parameter_map:
+                    if entry is player.character_save:
+                        entry["key"]["PlayerUId"] = PalObjects.Guid(player_uid)
+                        break
+
     def sav(self, gvas_file: GvasFile = None) -> bytes:
         logger.info("Converting %s to SAV", self.level_sav_path)
+        # Validate player entries before saving
+        if self._players:
+            self._validate_player_entries_before_save()
         target_gvas = gvas_file if gvas_file else self._gvas_file
         gvas = copy.deepcopy(target_gvas)
         return compress_gvas_to_sav(gvas.write(CUSTOM_PROPERTIES), 0x31)
@@ -1758,10 +2102,16 @@ class SaveFile(BaseModel):
         if not self._gvas_file:
             raise ValueError("No GvasFile has been loaded.")
 
-        for _, player in modified_players.items():
-            await ws_callback(f"Updating player {player.nickname}")
-            existing_player = self._players.get(player.uid)
-            existing_player.update_from(player)
+        for _, player_dto in modified_players.items():
+            await ws_callback(f"Updating player {player_dto.nickname}")
+            existing_player = self._players.get(player_dto.uid)
+            if not existing_player:
+                logger.error("Player %s not found in loaded players", player_dto.uid)
+                continue
+            existing_player.update_from(player_dto)
+            
+            # Synchronize CharacterSaveParameterMap entry to ensure PlayerUId matches
+            self._sync_player_entry(existing_player)
 
         logger.info("Updated %d players in the save file.", len(modified_players))
 
@@ -2044,6 +2394,40 @@ class SaveFile(BaseModel):
             if "GuildExtraSaveDataMap" in world_save_data
             else None
         )
+
+    def _sync_player_entry(self, player: Player) -> None:
+        """
+        Synchronize the player's CharacterSaveParameterMap entry to ensure
+        the PlayerUId in the entry's key matches the player's actual UID.
+        """
+        player_uid = player.uid
+        character_save = player.character_save
+        
+        # Find the entry in the map
+        entry_found = False
+        for entry in self._character_save_parameter_map:
+            if entry is character_save:
+                entry_found = True
+                entry_player_uid = PalObjects.get_guid(entry["key"]["PlayerUId"])
+                if not are_equal_uuids(entry_player_uid, player_uid):
+                    logger.warning(
+                        "Player entry UID mismatch detected for player %s. "
+                        "Updating entry PlayerUId from %s to %s",
+                        player.nickname,
+                        entry_player_uid,
+                        player_uid,
+                    )
+                    # Update the PlayerUId in the entry's key
+                    entry["key"]["PlayerUId"] = PalObjects.Guid(player_uid)
+                break
+        
+        if not entry_found:
+            logger.warning(
+                "Player %s (%s) entry not found in CharacterSaveParameterMap. "
+                "This may cause save/load issues.",
+                player.nickname,
+                player_uid,
+            )
 
     def _player_guild(self, player_id: UUID) -> Optional[Guild]:
         if not self._guilds:
