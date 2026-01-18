@@ -7,15 +7,27 @@ ARG PUBLIC_WS_URL=127.0.0.1:5174/ws
 
 WORKDIR /app
 
-# Copy only UI-related files for better caching
+# Copy package files first for better layer caching
+# This allows bun install to be cached when only source code or data changes
 COPY ui/package.json ui/bun.lock* ./ui/
+
 WORKDIR /app/ui
 
-# Install UI dependencies (cached layer)
-RUN bun install --frozen-lockfile
+# Install dependencies (cached layer - only rebuilds if package.json or bun.lock changes)
+# Use cache mount to speed up bun install across builds
+# Bun stores its cache in /root/.bun directory
+RUN --mount=type=cache,target=/root/.bun \
+    bun install --frozen-lockfile
 
-# Copy UI source files (we're already in /app/ui, so copy ui/ to current directory)
-COPY ui/ .
+# Copy data directory after install to avoid invalidating bun install cache
+# The ui/project.inlang/settings.json references "../data/json/ui/{locale}.json"
+WORKDIR /app
+COPY data/ ./data/
+
+# Copy remaining UI source files
+COPY ui/ ./ui/
+
+WORKDIR /app/ui
 
 # Build UI
 RUN echo "PUBLIC_WS_URL=${PUBLIC_WS_URL}" >.env && \
@@ -62,8 +74,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv sync --no-install-project; \
     fi
 
-# Copy the project into the image
-COPY . /app
+# Copy Python application code (but not data to avoid cache invalidation)
+COPY psp.py .
+COPY palworld_save_pal ./palworld_save_pal
+COPY tests ./tests
+
+# Copy data directory separately after install to avoid invalidating uv install cache
+COPY data ./data
 
 # Sync the project with test dependencies
 # Use --frozen to skip lockfile validation if it's out of date
@@ -112,7 +129,8 @@ COPY palworld_save_pal ./palworld_save_pal
 COPY data ./data
 
 # Copy UI build artifacts from ui_builder stage
-COPY --from=ui_builder /app/ui/build ./ui
+# SvelteKit outputs to ../ui_build (one directory up from /app/ui)
+COPY --from=ui_builder /app/ui_build ./ui
 
 # Set Python path
 ENV PYTHONPATH=/app
