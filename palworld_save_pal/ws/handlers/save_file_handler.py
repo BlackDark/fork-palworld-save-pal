@@ -86,7 +86,8 @@ async def download_save_file_handler(_: DownloadSaveFileMessage, ws: WebSocket):
 
         player_count = 0
         for player_id, files_data in player_sav_files.items():
-            player_uuid_str = str(player_id).replace("-", "")
+            # Convert UUID to uppercase hex string without dashes to match original format
+            player_uuid_str = player_id.hex.upper()
 
             if files_data.get("sav"):
                 player_sav_path = f"Players/{player_uuid_str}.sav"
@@ -194,11 +195,12 @@ async def load_zip_file_handler(message: LoadZipFileMessage, ws: WebSocket):
         )
 
     data = {
-        "level": app_state.save_file.world_name,
-        "players": [str(p) for p in app_state.players.keys()],
-        "name": app_state.save_file.level_sav_path,
-        "size": app_state.save_file.size,
+        "level": app_state.save_file.level_sav_path,
+        "players": [str(p) for p in app_state.player_summaries.keys()],
+        "world_name": app_state.save_file.world_name,
         "type": app_state.save_type.name.lower(),
+        "size": app_state.save_file.size,
+        "has_gps": app_state.has_gps_available(),
     }
 
     await ws_callback(
@@ -208,8 +210,12 @@ async def load_zip_file_handler(message: LoadZipFileMessage, ws: WebSocket):
     response = build_response(MessageType.LOADED_SAVE_FILES, data)
     await ws.send_json(response)
 
-    response = build_response(MessageType.GET_PLAYERS, app_state.players)
+    response = build_response(
+        MessageType.GET_PLAYER_SUMMARIES, app_state.player_summaries
+    )
     await ws.send_json(response)
 
-    response = build_response(MessageType.GET_GUILDS, app_state.guilds)
+    response = build_response(
+        MessageType.GET_GUILD_SUMMARIES, app_state.guild_summaries
+    )
     await ws.send_json(response)

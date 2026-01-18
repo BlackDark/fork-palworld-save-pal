@@ -2032,15 +2032,16 @@ class SaveFile(BaseModel):
                 player_files.sav.write(CUSTOM_PROPERTIES),
                 0x31,
             )
-            uid = str(uid).replace("-", "")
-            with open(os.path.join(output_path, f"{uid}.sav"), "wb") as f:
+            # Convert UUID to uppercase hex string without dashes to match original format
+            uid_str = uid.hex.upper()
+            with open(os.path.join(output_path, f"{uid_str}.sav"), "wb") as f:
                 f.write(sav_file)
             if player_files.dps:
                 dps_sav_file = compress_gvas_to_sav(
                     player_files.dps.write(CUSTOM_PROPERTIES),
                     0x31,
                 )
-                with open(os.path.join(output_path, f"{uid}_dps.sav"), "wb") as f_dps:
+                with open(os.path.join(output_path, f"{uid_str}_dps.sav"), "wb") as f_dps:
                     f_dps.write(dps_sav_file)
 
     async def update_pals(self, modified_pals: Dict[UUID, PalDTO], ws_callback) -> None:
