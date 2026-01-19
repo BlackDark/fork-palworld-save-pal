@@ -187,15 +187,26 @@ async def process_steam_save(save_path: str, ws: WebSocket, local: bool):
 
     app_state = get_app_state()
 
-    with open(validation_result.level_sav, "rb") as f:
-        level_sav = f.read()
+    # OPTIMIZATION: Use async file I/O to avoid blocking the event loop
+    import asyncio
+
+    def read_file_sync(filepath: str) -> bytes:
+        """Read file synchronously (to be run in thread)."""
+        with open(filepath, "rb") as f:
+            return f.read()
+
+    level_sav = await asyncio.to_thread(read_file_sync, validation_result.level_sav)
 
     level_meta = None
     if validation_result.level_meta:
-        with open(validation_result.level_meta, "rb") as f:
-            level_meta = f.read()
+        level_meta = await asyncio.to_thread(
+            read_file_sync, validation_result.level_meta
+        )
 
-    player_file_refs = FileManager.get_player_save_paths(validation_result.players_dir)
+    # FileManager.get_player_save_paths is also I/O bound, make it async
+    player_file_refs = await asyncio.to_thread(
+        FileManager.get_player_save_paths, validation_result.players_dir
+    )
 
     await app_state.process_save_files(
         save_path,

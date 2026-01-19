@@ -153,8 +153,15 @@ class AppState(BaseModel):
             await ws_callback("Loading Global Pal Storage...")
 
         try:
-            with open(self.gps_file_path, "rb") as f:
-                gps_bytes = f.read()
+            # OPTIMIZATION: Use async file I/O to avoid blocking
+            import asyncio
+
+            def read_file_sync(filepath: str) -> bytes:
+                """Read file synchronously (to be run in thread)."""
+                with open(filepath, "rb") as f:
+                    return f.read()
+
+            gps_bytes = await asyncio.to_thread(read_file_sync, self.gps_file_path)
 
             self.gps = self.save_file.load_gps(gps_bytes)
             self.gps_loaded = True

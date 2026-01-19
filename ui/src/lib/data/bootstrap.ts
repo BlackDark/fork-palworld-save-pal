@@ -17,23 +17,30 @@ import { technologiesData } from './technologies.svelte';
 import { workSuitabilityData } from './workSuitability.svelte';
 
 export const bootstrap = async () => {
-	await presetsData.reset();
-	await palsData.reset();
-	await activeSkillsData.reset();
-	await passiveSkillsData.reset();
-	await technologiesData.reset();
-	await elementsData.reset();
-	await expData.reset();
-	await friendshipData.reset();
-	await itemsData.reset();
-	await workSuitabilityData.reset();
-	await buildingsData.reset();
-	await mapObjects.reset();
-	await labResearchData.reset();
-	await missionsData.reset();
+	// Load all independent data files in parallel for maximum performance
+	// This reduces bootstrap time from sum of all loads to max(load times)
+	await Promise.all([
+		presetsData.reset(),
+		palsData.reset(),
+		activeSkillsData.reset(),
+		passiveSkillsData.reset(),
+		technologiesData.reset(),
+		elementsData.reset(),
+		expData.reset(),
+		friendshipData.reset(),
+		itemsData.reset(),
+		workSuitabilityData.reset(),
+		buildingsData.reset(),
+		mapObjects.reset(),
+		labResearchData.reset(),
+		missionsData.reset()
+	]);
+
+	// Load UPS state (may have dependencies, so load after other data)
 	const upsState = getUpsState();
 	await upsState.loadAll();
 
+	// Send version and sync app state (non-blocking, can be sent in parallel)
 	send(MessageType.GET_VERSION);
 	send(MessageType.SYNC_APP_STATE);
 };

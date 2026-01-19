@@ -1,0 +1,57 @@
+# Palworld Save Pal - Project Conventions
+
+## Project Structure
+
+### Backend
+- **Language**: Python 3.12+
+- **Package Manager**: uv (not pip)
+- **Location**: `palworld_save_pal/`
+- **Main Entry**: `psp.py`
+- **Framework**: FastAPI with WebSocket support
+
+### Frontend
+- **Framework**: Svelte (SvelteKit)
+- **Location**: `ui/`
+- **Package Manager**: npm/bun (see `ui/package.json`)
+
+## Testing
+
+### IMPORTANT: Test Execution
+- **DO NOT run tests locally with Python directly**
+- **ALWAYS use Docker Compose for testing**: `docker-compose.test.yml`
+- **Command**: `docker-compose -f docker-compose.test.yml up --build`
+- Tests are located in `tests/` directory
+- Performance baseline tests: `tests/test_performance_baseline.py`
+- Baseline results are saved to: `tests/performance_baseline.json`
+
+### Running Tests
+```bash
+# Run all tests
+docker-compose -f docker-compose.test.yml up --build
+
+# Run specific test file (modify command in docker-compose.test.yml)
+# Or override command:
+docker-compose -f docker-compose.test.yml run test pytest tests/test_performance_baseline.py -v
+```
+
+## Development Workflow
+
+1. **Backend changes**: Edit Python files in `palworld_save_pal/`
+2. **Frontend changes**: Edit Svelte files in `ui/src/`
+3. **Testing**: Always use Docker Compose, never run Python tests locally
+4. **Performance**: Check `tests/performance_baseline.json` for baseline metrics
+
+## Key Files
+
+- `psp.py`: Main backend server entry point
+- `ui/src/lib/data/bootstrap.ts`: Frontend data loading (should be parallel)
+- `palworld_save_pal/utils/json_manager.py`: JSON file manager with caching
+- `palworld_save_pal/game/save_file.py`: Save file loading and parsing
+- `tests/test_performance_baseline.py`: Performance baseline tests
+
+## Performance Optimization Notes
+
+- JSON files are cached in memory after first read
+- Frontend bootstrap loads data files in parallel
+- Player level extraction should be optimized/lazy
+- Use async I/O for file operations where possible

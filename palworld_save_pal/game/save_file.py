@@ -950,16 +950,41 @@ class SaveFile(BaseModel):
         logger.info("Loading %s (minimal mode)", self.level_sav_path)
         start_time = time.perf_counter()
 
-        raw_gvas, _ = decompress_sav_to_gvas(level_sav)
-        gvas_file = GvasFile.read(
-            raw_gvas, PALWORLD_TYPE_HINTS, CUSTOM_PROPERTIES, allow_nan=True
-        )
+        # OPTIMIZATION: Run CPU-intensive decompression and parsing in thread pool
+        # This prevents blocking the event loop during the ~1.5s operation
+        import asyncio
+
+        def parse_level_sav(sav_bytes: bytes):
+            """Parse Level.sav synchronously (runs in thread pool)."""
+            raw_gvas, _ = decompress_sav_to_gvas(sav_bytes)
+            return GvasFile.read(
+                raw_gvas, PALWORLD_TYPE_HINTS, CUSTOM_PROPERTIES, allow_nan=True
+            )
+
+        gvas_file = await asyncio.to_thread(parse_level_sav, level_sav)
         self._gvas_file = gvas_file
         logger.info(f"Level.sav parsed in {time.perf_counter() - start_time:.2f}s")
 
         if level_meta:
             await ws_callback("Loading level meta...")
-            self.load_level_meta(level_meta)
+            # OPTIMIZATION: Make level meta parsing async
+            import asyncio
+
+            def parse_level_meta(meta_bytes: bytes):
+                """Parse level meta synchronously (runs in thread pool)."""
+                raw_gvas, _ = decompress_sav_to_gvas(meta_bytes)
+                custom_properties = {
+                    k: v
+                    for k, v in PALWORLD_CUSTOM_PROPERTIES.items()
+                    if k not in DISABLED_PROPERTIES
+                }
+                return GvasFile.read(
+                    raw_gvas, PALWORLD_TYPE_HINTS, custom_properties, allow_nan=True
+                )
+
+            self._level_meta_gvas_file = await asyncio.to_thread(
+                parse_level_meta, level_meta
+            )
             self._load_world_name()
         else:
             await ws_callback("No LevelMeta.sav found, skipped.")
@@ -1256,53 +1281,15 @@ class SaveFile(BaseModel):
                         type(level_data),
                     )
         
-        # Fallback: if level is still None, try to temporarily load the player to get the level
-        # This is more reliable than trying to parse the file structure manually
-        if level is None and uid in self._player_file_refs:
-            logger.debug("Level not found in CharacterSaveParameterMap for %s (nickname: %s), trying to load player temporarily", uid, nickname)
-            try:
-                # Find the player entry in CharacterSaveParameterMap
-                player_entry = None
-                for entry in self._character_save_parameter_map:
-                    if self._is_player(entry):
-                        entry_player_uid = PalObjects.get_guid(entry["key"]["PlayerUId"])
-                        if are_equal_uuids(entry_player_uid, uid):
-                            player_entry = entry
-                            break
-                
-                if player_entry:
-                    # Try to extract save_parameter the same way Player class does
-                    try:
-                        player_save_parameter = PalObjects.get_nested(
-                            player_entry,
-                            "value",
-                            "RawData",
-                            "value",
-                            "object",
-                            "SaveParameter",
-                            "value",
-                        )
-                        if player_save_parameter and "Level" in player_save_parameter:
-                            level_value = PalObjects.get_byte_property(player_save_parameter["Level"])
-                            if level_value is not None:
-                                try:
-                                    level = int(level_value) if not isinstance(level_value, int) else level_value
-                                    logger.info("Successfully extracted level %d from CharacterSaveParameterMap entry for %s (nickname: %s)", level, uid, nickname)
-                                except (ValueError, TypeError):
-                                    logger.warning("Failed to convert level from CharacterSaveParameterMap for %s: %s", uid, level_value)
-                    except (KeyError, TypeError) as e:
-                        logger.debug("Failed to extract save_parameter from CharacterSaveParameterMap entry for %s: %s", uid, e)
-                
-                # If still None, try loading from player file as last resort
-                if level is None:
-                    level = self._extract_level_from_player_file(uid)
-                    if level is not None:
-                        logger.info("Successfully extracted level %d from player file for %s (nickname: %s)", level, uid, nickname)
-                    else:
-                        logger.warning("Could not extract level from player file for %s (nickname: %s), defaulting to None", uid, nickname)
-            except Exception as e:
-                logger.warning("Error trying to extract level for %s (nickname: %s): %s", uid, nickname, e, exc_info=True)
-        elif level is None:
+        # OPTIMIZATION: Skip expensive file-based level extraction during summary creation
+        # Level extraction from player files (_extract_level_from_player_file) is very expensive
+        # as it decompresses and parses entire .sav files, which can take seconds per player
+        # and blocks the summary extraction process.
+        # 
+        # If level is not available in save_parameter, we allow it to be None.
+        # The level can be extracted later on-demand when the player is actually loaded if needed.
+        # This dramatically improves initial loading performance.
+        if level is None:
             logger.warning(
                 "No 'Level' key in save_parameter for player %s (nickname: %s). Available keys: %s",
                 uid,
@@ -1342,7 +1329,10 @@ class SaveFile(BaseModel):
         pal_owner_counts: Dict[UUID, int],
     ) -> Dict[UUID, PlayerSummary]:
         summaries = {}
-        max_workers = min(4, len(players_data))
+        # OPTIMIZATION: Use more CPU cores for better parallelism
+        # Previously limited to 4 workers, now uses available CPU cores
+        # This significantly improves performance on multi-core systems
+        max_workers = min(os.cpu_count() or 4, len(players_data))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_uid = {
@@ -1617,16 +1607,27 @@ class SaveFile(BaseModel):
             logger.warning(f"No save data for player {player_id}")
             return None
 
+        # OPTIMIZATION: Use async file I/O and thread pool for CPU-intensive parsing
+        import asyncio
+
+        def read_file_sync(filepath: str) -> bytes:
+            """Read file synchronously (to be run in thread)."""
+            with open(filepath, "rb") as f:
+                return f.read()
+
         if isinstance(sav_data, bytes):
             sav_bytes = sav_data
         else:
-            with open(sav_data, "rb") as f:
-                sav_bytes = f.read()
+            sav_bytes = await asyncio.to_thread(read_file_sync, sav_data)
 
-        raw_gvas, _ = decompress_sav_to_gvas(sav_bytes)
-        gvas_file = GvasFile.read(
-            raw_gvas, PALWORLD_TYPE_HINTS, CUSTOM_PROPERTIES, allow_nan=True
-        )
+        def parse_sav_file(sav_bytes: bytes):
+            """Parse save file synchronously (runs in thread pool)."""
+            raw_gvas, _ = decompress_sav_to_gvas(sav_bytes)
+            return GvasFile.read(
+                raw_gvas, PALWORLD_TYPE_HINTS, CUSTOM_PROPERTIES, allow_nan=True
+            )
+
+        gvas_file = await asyncio.to_thread(parse_sav_file, sav_bytes)
 
         dps_gvas = None
         dps_data = file_ref.get("dps")
@@ -1634,12 +1635,8 @@ class SaveFile(BaseModel):
             if isinstance(dps_data, bytes):
                 dps_bytes = dps_data
             else:
-                with open(dps_data, "rb") as f:
-                    dps_bytes = f.read()
-            raw_dps, _ = decompress_sav_to_gvas(dps_bytes)
-            dps_gvas = GvasFile.read(
-                raw_dps, PALWORLD_TYPE_HINTS, CUSTOM_PROPERTIES, allow_nan=True
-            )
+                dps_bytes = await asyncio.to_thread(read_file_sync, dps_data)
+            dps_gvas = await asyncio.to_thread(parse_sav_file, dps_bytes)
 
         self._player_gvas_files[player_id] = PlayerGvasFiles(
             sav=gvas_file, dps=dps_gvas
