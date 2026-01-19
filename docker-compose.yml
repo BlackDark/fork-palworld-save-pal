@@ -1,5 +1,6 @@
 services:
   backend:
+    image: blackdark93/palworld-save-pal-editor:latest
     build:
       context: .
       dockerfile: Dockerfile

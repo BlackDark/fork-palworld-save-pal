@@ -6,6 +6,8 @@
 
 Palworld Save Pal is a tool for managing and analyzing save files.
 
+**HINT**: Uploaded docker image: `blackdark93/palworld-save-pal-editor:latest`
+
 ## 📋 Table of Contents
 
 - [Palworld Save Pal](#palworld-save-pal)

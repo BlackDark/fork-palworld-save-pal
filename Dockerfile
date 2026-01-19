@@ -34,8 +34,8 @@ RUN echo "PUBLIC_WS_URL=${PUBLIC_WS_URL}" >.env && \
     echo "PUBLIC_DESKTOP_MODE=false" >>.env && \
     bun run build
 
-# Stage 2: Python Dependencies Builder with uv
-FROM python:3.12-slim AS deps
+# Stage 2: Python Dependencies Builder with uv (production dependencies only)
+FROM python:3.13-slim AS deps-builder
 
 WORKDIR /app
 
@@ -64,37 +64,42 @@ RUN chmod +x /usr/local/bin/uv
 COPY pyproject.toml .
 COPY uv.lock* .
 
-# Install dependencies using uv sync (proper way to install from pyproject.toml)
-# First sync without the project to cache dependencies
-# Use --frozen if lock file might not be up to date, --locked if it is
+# Install production dependencies only (no test dependencies)
+# Try --locked first, then --frozen, then fall back to resolving fresh if lockfile is incompatible
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -f uv.lock ]; then \
-        uv sync --locked --no-install-project || uv sync --frozen --no-install-project; \
+        uv sync --locked --no-install-project 2>/dev/null || \
+        uv sync --frozen --no-install-project 2>/dev/null || \
+        uv sync --no-install-project; \
     else \
         uv sync --no-install-project; \
     fi
 
 # Copy Python application code (but not data to avoid cache invalidation)
+# Note: tests directory is NOT copied here - only in test-deps stage
 COPY psp.py .
 COPY palworld_save_pal ./palworld_save_pal
-COPY tests ./tests
 
 # Copy data directory separately after install to avoid invalidating uv install cache
 COPY data ./data
 
-# Sync the project with test dependencies
-# Use --frozen to skip lockfile validation if it's out of date
+# Sync the project (production dependencies only, no --extra test)
+# Try --frozen first, fall back to resolving fresh if lockfile is incompatible
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --extra test || uv sync --extra test
+    uv sync --frozen 2>/dev/null || uv sync
 
 # Stage 3: Test Dependencies Stage (for running tests in container)
-FROM deps AS test-deps
+FROM deps-builder AS test-deps
 
 WORKDIR /app
 
-# Application code is already copied in deps stage
-# Just ensure tests and save files are available
-# (they should already be there from the COPY . /app in deps stage)
+# Copy tests directory (not included in deps-builder)
+COPY tests ./tests
+
+# Install test dependencies on top of production dependencies
+# Try --frozen first, fall back to resolving fresh if lockfile is incompatible
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --extra test 2>/dev/null || uv sync --extra test
 
 # Set up environment to use the virtual environment
 ENV VIRTUAL_ENV=/app/.venv
@@ -105,25 +110,31 @@ ENV PYTHONUNBUFFERED=1
 # Default command runs tests, but can be overridden
 CMD ["pytest", "tests/", "-v", "--tb=short"]
 
-# Stage 4: Final Runtime Image
-FROM python:3.12-slim
+# Stage 4: Final Runtime Image (minimal production image)
+FROM python:3.13-slim AS runtime
 
 WORKDIR /app
 
-# Install minimal runtime dependencies
+# Install only runtime libraries (not dev packages or build tools)
+# PyGObject requires these runtime libraries
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+    libcairo2 \
+    libgirepository-2.0-0 \
+    libgirepository-1.0-1 \
+    libglib2.0-0 \
+    gir1.2-glib-2.0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Python virtual environment from deps stage
+# Copy Python virtual environment from deps-builder stage (production dependencies only)
 # uv sync creates a .venv directory with all dependencies
-COPY --from=deps /app/.venv /app/.venv
+COPY --from=deps-builder /app/.venv /app/.venv
 
 # Set up environment to use the virtual environment
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy application code
+# Copy application code (no tests directory)
 COPY psp.py .
 COPY palworld_save_pal ./palworld_save_pal
 COPY data ./data
