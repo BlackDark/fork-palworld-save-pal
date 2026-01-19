@@ -49,8 +49,8 @@ export const updateUpsPalHandler: WSMessageHandler = {
 					'collection_id' in data.pal &&
 					data.pal.collection_id !== upsState.pals[index].collection_id;
 
-				// Update the pal in place
-				Object.assign(upsState.pals[index], data.pal);
+				// Update the pal in place, including pal_data if present
+				upsState.pals[index] = { ...upsState.pals[index], ...data.pal };
 
 				// Refresh collections if collection assignment changed
 				if (collectionChanged) {

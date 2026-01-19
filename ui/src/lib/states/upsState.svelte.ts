@@ -240,17 +240,20 @@ class UPSStateClass {
 
 	async updatePal(
 		palId: number,
-		updates: Partial<Pick<UPSPal, 'nickname' | 'collection_id' | 'tags' | 'notes'>>
+		updates: Partial<Pick<UPSPal, 'nickname' | 'collection_id' | 'tags' | 'notes' | 'level'>> & {
+			pal_data?: Record<string, any>;
+		}
 	): Promise<void> {
 		try {
-			const upsPal = await sendAndWait(MessageType.UPDATE_UPS_PAL, {
+			const response = await sendAndWait<{ pal: Partial<UPSPal> }>(MessageType.UPDATE_UPS_PAL, {
 				pal_id: palId,
 				updates
 			});
 
 			const index = this.pals.findIndex((p) => p.id === palId);
-			if (index >= 0) {
-				this.pals[index] = { ...this.pals[index], ...updates };
+			if (index >= 0 && response?.pal) {
+				// Use the response data from backend which includes updated pal_data
+				this.pals[index] = { ...this.pals[index], ...response.pal };
 			}
 
 			// Refresh collections if collection assignment changed

@@ -11,6 +11,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./palworld_save_pal:/app/palworld_save_pal
+      - ./persistent:/app/persistent  # Persistent data directory
+      - ./psp.db:/app/psp.db  # Persist database at default location (file must exist first!)
     environment:
       - PORT=5174
+      # PSP_DB_PATH defaults to psp.db in working directory (/app/psp.db)
+      # To use persistent directory instead, uncomment:
+      # - PSP_DB_PATH=/app/persistent/psp.db
     command: python psp.py

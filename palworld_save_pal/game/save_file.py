@@ -1941,21 +1941,61 @@ class SaveFile(BaseModel):
         return compress_gvas_to_sav(gvas.write(CUSTOM_PROPERTIES), 0x31)
 
     def player_savs(self) -> Dict[UUID, bytes]:
-        logger.info("Converting player save files to SAV", len(self._player_gvas_files))
-        return {
-            uid: compress_gvas_to_sav(
-                self._player_gvas_files[uid].sav.write(CUSTOM_PROPERTIES),
+        logger.info(
+            "Converting player save files to SAV: %d loaded, %d total",
+            len(self._player_gvas_files),
+            len(self._player_file_refs),
+        )
+        result: Dict[UUID, bytes] = {}
+        
+        # Export loaded players (with any modifications)
+        for uid, files in self._player_gvas_files.items():
+            result[uid] = compress_gvas_to_sav(
+                files.sav.write(CUSTOM_PROPERTIES),
                 0x31,
             )
-            for uid in self._player_gvas_files
-        }
+        
+        # Export unloaded players (use original file data)
+        for uid, file_ref in self._player_file_refs.items():
+            if uid in result:
+                # Already exported as loaded player
+                continue
+            
+            # Get SAV data
+            sav_data = file_ref.get("sav")
+            if sav_data is None:
+                logger.warning("No save data for player %s in file refs", uid)
+                continue
+            
+            # Handle file path or bytes
+            if isinstance(sav_data, bytes):
+                result[uid] = sav_data
+            elif isinstance(sav_data, str):
+                # Read from file path
+                try:
+                    with open(sav_data, "rb") as f:
+                        result[uid] = f.read()
+                except Exception as e:
+                    logger.error("Failed to read player save file %s: %s", sav_data, e)
+                    continue
+            else:
+                logger.warning("Unexpected sav_data type for player %s: %s", uid, type(sav_data))
+                continue
+        
+        logger.info("Exported %d player save files", len(result))
+        return result
 
     def player_gvas_files(self) -> Dict[UUID, Dict[str, bytes]]:
         logger.info(
-            "Converting player save files to SAV: %s", len(self._player_gvas_files)
+            "Converting player save files to SAV: %d loaded, %d total",
+            len(self._player_gvas_files),
+            len(self._player_file_refs),
         )
-        return {
-            uid: {
+        result: Dict[UUID, Dict[str, bytes]] = {}
+        
+        # Export loaded players (with any modifications)
+        for uid, files in self._player_gvas_files.items():
+            result[uid] = {
                 "sav": compress_gvas_to_sav(
                     files.sav.write(CUSTOM_PROPERTIES),
                     0x31,
@@ -1969,8 +2009,56 @@ class SaveFile(BaseModel):
                     else None
                 ),
             }
-            for uid, files in self._player_gvas_files.items()
-        }
+        
+        # Export unloaded players (use original file data)
+        for uid, file_ref in self._player_file_refs.items():
+            if uid in result:
+                # Already exported as loaded player
+                continue
+            
+            # Get SAV data
+            sav_data = file_ref.get("sav")
+            if sav_data is None:
+                logger.warning("No save data for player %s in file refs", uid)
+                continue
+            
+            # Handle file path or bytes
+            if isinstance(sav_data, bytes):
+                sav_bytes = sav_data
+            elif isinstance(sav_data, str):
+                # Read from file path
+                try:
+                    with open(sav_data, "rb") as f:
+                        sav_bytes = f.read()
+                except Exception as e:
+                    logger.error("Failed to read player save file %s: %s", sav_data, e)
+                    continue
+            else:
+                logger.warning("Unexpected sav_data type for player %s: %s", uid, type(sav_data))
+                continue
+            
+            # Get DPS data if available
+            dps_bytes = None
+            dps_data = file_ref.get("dps")
+            if dps_data:
+                if isinstance(dps_data, bytes):
+                    dps_bytes = dps_data
+                elif isinstance(dps_data, str):
+                    try:
+                        with open(dps_data, "rb") as f:
+                            dps_bytes = f.read()
+                    except Exception as e:
+                        logger.error("Failed to read player DPS file %s: %s", dps_data, e)
+                        # Continue without DPS if read fails
+                        dps_bytes = None
+            
+            result[uid] = {
+                "sav": sav_bytes,
+                "dps": dps_bytes,
+            }
+        
+        logger.info("Exported %d player save files", len(result))
+        return result
 
     def to_json_file(
         self,
@@ -2023,7 +2111,15 @@ class SaveFile(BaseModel):
             f.write(sav_file)
 
     def to_player_sav_files(self, output_path: str) -> None:
-        logger.info("Converting player save files to SAV, saving to %s", output_path)
+        logger.info(
+            "Converting player save files to SAV, saving to %s: %d loaded, %d total",
+            output_path,
+            len(self._player_gvas_files),
+            len(self._player_file_refs),
+        )
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Export loaded players (with any modifications)
         for uid, player_files in self._player_gvas_files.items():
             sav_file = compress_gvas_to_sav(
                 player_files.sav.write(CUSTOM_PROPERTIES),
@@ -2040,6 +2136,61 @@ class SaveFile(BaseModel):
                 )
                 with open(os.path.join(output_path, f"{uid_str}_dps.sav"), "wb") as f_dps:
                     f_dps.write(dps_sav_file)
+        
+        # Export unloaded players (copy original file data)
+        for uid, file_ref in self._player_file_refs.items():
+            if uid in self._player_gvas_files:
+                # Already exported as loaded player
+                continue
+            
+            # Get SAV data
+            sav_data = file_ref.get("sav")
+            if sav_data is None:
+                logger.warning("No save data for player %s in file refs", uid)
+                continue
+            
+            # Convert UUID to uppercase hex string without dashes to match original format
+            uid_str = uid.hex.upper()
+            
+            # Handle file path or bytes
+            if isinstance(sav_data, bytes):
+                sav_bytes = sav_data
+            elif isinstance(sav_data, str):
+                # Copy from file path
+                try:
+                    with open(sav_data, "rb") as f:
+                        sav_bytes = f.read()
+                except Exception as e:
+                    logger.error("Failed to read player save file %s: %s", sav_data, e)
+                    continue
+            else:
+                logger.warning("Unexpected sav_data type for player %s: %s", uid, type(sav_data))
+                continue
+            
+            # Write SAV file
+            with open(os.path.join(output_path, f"{uid_str}.sav"), "wb") as f:
+                f.write(sav_bytes)
+            
+            # Handle DPS file if available
+            dps_data = file_ref.get("dps")
+            if dps_data:
+                if isinstance(dps_data, bytes):
+                    dps_bytes = dps_data
+                elif isinstance(dps_data, str):
+                    try:
+                        with open(dps_data, "rb") as f:
+                            dps_bytes = f.read()
+                    except Exception as e:
+                        logger.error("Failed to read player DPS file %s: %s", dps_data, e)
+                        continue
+                else:
+                    logger.warning("Unexpected dps_data type for player %s: %s", uid, type(dps_data))
+                    continue
+                
+                with open(os.path.join(output_path, f"{uid_str}_dps.sav"), "wb") as f_dps:
+                    f_dps.write(dps_bytes)
+        
+        logger.info("Exported %d player save files to %s", len(self._player_file_refs), output_path)
 
     async def update_pals(self, modified_pals: Dict[UUID, PalDTO], ws_callback) -> None:
         if not self._gvas_file:

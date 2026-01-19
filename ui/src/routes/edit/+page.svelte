@@ -8,7 +8,9 @@
 	const appState = getAppState();
 
 	onMount(() => {
-		if (appState.selectedPlayer) {
+		if (appState.selectedPal) {
+			goto(`/edit/pal`);
+		} else if (appState.selectedPlayer) {
 			goto(`/edit/player`);
 		}
 	});

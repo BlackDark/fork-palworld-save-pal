@@ -109,7 +109,9 @@ export interface UPSAddPalRequest {
 
 export interface UPSUpdatePalRequest {
 	pal_id: number;
-	updates: Partial<Pick<UPSPal, 'nickname' | 'collection_id' | 'tags' | 'notes'>>;
+	updates: Partial<Pick<UPSPal, 'nickname' | 'collection_id' | 'tags' | 'notes' | 'level'>> & {
+		pal_data?: Record<string, any>;
+	};
 }
 
 export interface UPSDeletePalsRequest {

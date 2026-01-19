@@ -381,6 +381,7 @@ class UPSService:
             _ = pal.character_id
             _ = pal.nickname
             _ = pal.level
+            _ = pal.pal_data  # Ensure pal_data is loaded
             _ = pal.collection_id
             _ = pal.tags
             _ = pal.notes

@@ -197,15 +197,16 @@ class AppState {
 			throw new Error('UPS pal ID not found');
 		}
 
+		// Create a clean copy of pal data without UPS metadata
+		const { __ups_source, __ups_id, __ups_new, state, ...cleanPalData } = pal;
+
 		// Create the updates object from pal data
 		const updates = {
 			nickname: pal.nickname,
 			level: pal.level,
-			pal_data: {
-				...pal
-			}
+			pal_data: cleanPalData
 		};
-		upsState.updatePal(pal.__ups_id, updates);
+		await upsState.updatePal(pal.__ups_id, updates);
 	}
 
 	processPlayers() {
